@@ -26,7 +26,6 @@ var (
 		PolicyVerdictNotify: &specPolicyVerdictNotify,
 		PolicyAuditMode:     &specPolicyAuditMode,
 		MonitorAggregation:  &specMonitorAggregation,
-		NAT46:               &specNAT46,
 	}
 )
 
