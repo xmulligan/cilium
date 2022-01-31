@@ -397,12 +397,6 @@ ct_recreate6:
 			return ret;
 	}
 #endif
-#ifdef ENABLE_NAT46
-	if (unlikely(ipv6_addr_is_mapped(daddr))) {
-		ep_tail_call(ctx, CILIUM_CALL_NAT64);
-		return DROP_MISSED_TAIL_CALL;
-	}
-#endif
 	if (is_defined(ENABLE_REDIRECT_FAST))
 		return redirect_direct_v6(ctx, l3_off, ip6);
 
@@ -1406,12 +1400,6 @@ ipv4_policy(struct __ctx_buff *ctx, int ifindex, __u32 src_label, enum ct_status
 		return POLICY_ACT_PROXY_REDIRECT;
 	}
 
-#ifdef ENABLE_NAT46
-	if (ctx_load_meta(ctx, CB_NAT46_STATE) == NAT46) {
-		ep_tail_call(ctx, CILIUM_CALL_NAT46);
-		return DROP_MISSED_TAIL_CALL;
-	}
-#endif
 	if (unlikely(ret == CT_REPLY && ct_state.rev_nat_index &&
 		     !ct_state.loopback)) {
 		int ret2;
@@ -1707,60 +1695,6 @@ out:
 
 	return ret;
 }
-
-#ifdef ENABLE_NAT46
-__section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_NAT64)
-int tail_ipv6_to_ipv4(struct __ctx_buff *ctx)
-{
-	int ret;
-
-	ret = ipv6_to_ipv4(ctx, 14, LXC_IPV4);
-	if (IS_ERR(ret))
-		goto drop_err;
-
-	cilium_dbg_capture(ctx, DBG_CAPTURE_AFTER_V64, ctx->ingress_ifindex);
-
-	ctx_store_meta(ctx, CB_NAT46_STATE, NAT64);
-
-	invoke_tailcall_if(__and(is_defined(ENABLE_IPV4), is_defined(ENABLE_IPV6)),
-			   CILIUM_CALL_IPV4_FROM_LXC, tail_handle_ipv4);
-drop_err:
-	return send_drop_notify(ctx, SECLABEL, 0, 0, ret, CTX_ACT_DROP,
-				METRIC_EGRESS);
-}
-
-static __always_inline int handle_ipv4_to_ipv6(struct __ctx_buff *ctx)
-{
-	union v6addr dp = {};
-	void *data, *data_end;
-	struct iphdr *ip4;
-
-	if (!revalidate_data(ctx, &data, &data_end, &ip4))
-		return DROP_INVALID;
-
-	BPF_V6(dp, LXC_IP);
-	return ipv4_to_ipv6(ctx, ip4, 14, &dp);
-
-}
-
-__section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_NAT46)
-int tail_ipv4_to_ipv6(struct __ctx_buff *ctx)
-{
-	int ret;
-
-	ret = handle_ipv4_to_ipv6(ctx);
-	if (IS_ERR(ret))
-		goto drop_err;
-
-	cilium_dbg_capture(ctx, DBG_CAPTURE_AFTER_V46, ctx->ingress_ifindex);
-
-	invoke_tailcall_if(__and(is_defined(ENABLE_IPV4), is_defined(ENABLE_IPV6)),
-			   CILIUM_CALL_IPV6_TO_LXC_POLICY_ONLY, tail_ipv6_policy);
-drop_err:
-	return send_drop_notify(ctx, SECLABEL, 0, 0, ret, CTX_ACT_DROP,
-				METRIC_INGRESS);
-}
-#endif
 
 /* Attached to the lxc device on the way to the container, only if endpoint
  * routes are enabled.
