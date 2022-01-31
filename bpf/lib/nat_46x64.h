@@ -1,23 +1,18 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/* Copyright (C) 2016-2020 Authors of Cilium */
+/* Copyright (C) 2016-2022 Authors of Cilium */
 
-#ifndef __LIB_NAT46__
-#define __LIB_NAT46__
+#ifndef __LIB_NAT_46X64__
+#define __LIB_NAT_46X64__
 
 #include <linux/ip.h>
 #include <linux/icmp.h>
 #include <linux/icmpv6.h>
+
 #include "common.h"
 #include "ipv4.h"
 #include "ipv6.h"
 #include "eth.h"
 #include "dbg.h"
-
-#if defined(ENABLE_NAT46) && \
-    (!defined(ENABLE_IPV4) || !defined(ENABLE_IPV6) || \
-     !defined(CONNTRACK) || !defined(ENABLE_HOST_REDIRECT))
-#error "ENABLE_NAT46 requisite options are not configured, see lib/nat46.h."
-#endif
 
 static __always_inline int get_csum_offset(__u8 protocol)
 {
@@ -398,4 +393,4 @@ static __always_inline int ipv6_to_ipv4(struct __ctx_buff *ctx, int nh_off,
 
 	return 0;
 }
-#endif /* __LIB_NAT46__ */
+#endif /* __LIB_NAT_46X64__ */
