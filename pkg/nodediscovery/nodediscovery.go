@@ -361,6 +361,7 @@ func (n *NodeDiscovery) mutateNodeResource(nodeResource *ciliumv2.CiliumNode) er
 		context.TODO(),
 		nodeTypes.GetName(),
 	)
+
 	switch {
 	case err != nil && k8serrors.IsNotFound(err) && len(nodeResource.ObjectMeta.OwnerReferences) == 0:
 		log.WithError(err).WithField(
