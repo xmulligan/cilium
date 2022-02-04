@@ -200,6 +200,10 @@ func (h *HeaderfileWriter) WriteNodeConfig(w io.Writer, cfg *datapath.LocalNodeC
 		cDefinesMap["ENABLE_IPV6"] = "1"
 	}
 
+	if option.Config.EnableIPv4 && option.Config.EnableIPv6 {
+		cDefinesMap["ENABLE_NAT_46X64"] = "1"
+	}
+
 	if option.Config.EnableIPSec {
 		cDefinesMap["ENABLE_IPSEC"] = "1"
 	}

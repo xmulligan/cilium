@@ -37,9 +37,9 @@ type LBMap interface {
 	UpsertService(*lbmap.UpsertServiceParams) error
 	UpsertMaglevLookupTable(uint16, map[string]lb.BackendID, bool) error
 	IsMaglevLookupTableRecreated(bool) bool
-	DeleteService(lb.L3n4AddrID, int, bool) error
+	DeleteService(lb.L3n4AddrID, int, bool, lb.SVCNatPolicy) error
 	AddBackend(lb.BackendID, net.IP, uint16, bool) error
-	DeleteBackendByID(lb.BackendID, bool) error
+	DeleteBackendByID(lb.BackendID) error
 	AddAffinityMatch(uint16, lb.BackendID) error
 	DeleteAffinityMatch(uint16, lb.BackendID) error
 	UpdateSourceRanges(uint16, []*cidr.CIDR, []*cidr.CIDR, bool) error
@@ -69,6 +69,7 @@ type svcInfo struct {
 
 	svcType                   lb.SVCType
 	svcTrafficPolicy          lb.SVCTrafficPolicy
+	svcNatPolicy              lb.SVCNatPolicy
 	sessionAffinity           bool
 	sessionAffinityTimeoutSec uint32
 	svcHealthCheckNodePort    uint16
@@ -89,6 +90,7 @@ func (svc *svcInfo) deepCopyToLBSVC() *lb.SVC {
 		Backends:            backends,
 		Type:                svc.svcType,
 		TrafficPolicy:       svc.svcTrafficPolicy,
+		NatPolicy:           svc.svcNatPolicy,
 		HealthCheckNodePort: svc.svcHealthCheckNodePort,
 		Name:                svc.svcName,
 		Namespace:           svc.svcNamespace,
@@ -335,14 +337,37 @@ func (s *Service) UpsertService(params *lb.SVC) (bool, lb.ID, error) {
 			option.EnableSVCSourceRangeCheck)
 	}
 
-	ipv6Svc := params.Frontend.IsIPv6()
-	if ipv6Svc && !option.Config.EnableIPv6 {
+	// Backends must either be the same IP proto as the frontend, or can be of
+	// a different proto for NAT46/64. However, backends must be consistently
+	// either v4 or v6, but not a mix.
+	v4Seen := 0
+	v6Seen := 0
+	for _, b := range params.Backends {
+		if b.L3n4Addr.IsIPv6() {
+			v6Seen++
+		} else {
+			v4Seen++
+		}
+	}
+	if v4Seen > 0 && v6Seen > 0 {
+		err := fmt.Errorf("Unable to upsert service %s with a mixed set of IPv4 and IPv6 backends", params.Frontend.L3n4Addr.String())
+		return false, lb.ID(0), err
+	}
+	v6Svc := params.Frontend.IsIPv6()
+	if (v6Svc || v6Seen > 0) && !option.Config.EnableIPv6 {
 		err := fmt.Errorf("Unable to upsert service %s as IPv6 is disabled", params.Frontend.L3n4Addr.String())
 		return false, lb.ID(0), err
 	}
-	if !ipv6Svc && !option.Config.EnableIPv4 {
+	if (!v6Svc || v4Seen > 0) && !option.Config.EnableIPv4 {
 		err := fmt.Errorf("Unable to upsert service %s as IPv4 is disabled", params.Frontend.L3n4Addr.String())
 		return false, lb.ID(0), err
+	}
+
+	params.NatPolicy = lb.SVCNatPolicyNone
+	if v6Svc && v4Seen > 0 {
+		params.NatPolicy = lb.SVCNatPolicyNat64
+	} else if !v6Svc && v6Seen > 0 {
+		params.NatPolicy = lb.SVCNatPolicyNat46
 	}
 
 	// If needed, create svcInfo and allocate service ID
@@ -636,6 +661,7 @@ func (s *Service) createSVCInfoIfNotExist(p *lb.SVC) (*svcInfo, bool, bool,
 			sessionAffinityTimeoutSec: p.SessionAffinityTimeoutSec,
 
 			svcTrafficPolicy:         p.TrafficPolicy,
+			svcNatPolicy:             p.NatPolicy,
 			svcHealthCheckNodePort:   p.HealthCheckNodePort,
 			loadBalancerSourceRanges: p.LoadBalancerSourceRanges,
 		}
@@ -663,6 +689,7 @@ func (s *Service) createSVCInfoIfNotExist(p *lb.SVC) (*svcInfo, bool, bool,
 		prevLoadBalancerSourceRanges = svc.loadBalancerSourceRanges
 		svc.svcType = p.Type
 		svc.svcTrafficPolicy = p.TrafficPolicy
+		svc.svcNatPolicy = p.NatPolicy
 		svc.svcHealthCheckNodePort = p.HealthCheckNodePort
 		svc.sessionAffinity = p.SessionAffinity
 		svc.sessionAffinityTimeoutSec = p.SessionAffinityTimeoutSec
@@ -722,7 +749,7 @@ func (s *Service) upsertServiceIntoLBMaps(svc *svcInfo, onlyLocalBackends bool,
 	prevSessionAffinity bool, prevLoadBalancerSourceRanges []*cidr.CIDR,
 	obsoleteSVCBackendIDs []lb.BackendID, scopedLog *logrus.Entry) error {
 
-	ipv6 := svc.frontend.IsIPv6()
+	v6FE := svc.frontend.IsIPv6()
 
 	var (
 		toDeleteAffinity, toAddAffinity []lb.BackendID
@@ -764,8 +791,7 @@ func (s *Service) upsertServiceIntoLBMaps(svc *svcInfo, onlyLocalBackends bool,
 		if checkLBSrcRange || len(prevLoadBalancerSourceRanges) != 0 {
 			if err := s.lbmap.UpdateSourceRanges(uint16(svc.frontend.ID),
 				prevLoadBalancerSourceRanges, svc.loadBalancerSourceRanges,
-				ipv6); err != nil {
-
+				v6FE); err != nil {
 				return err
 			}
 		}
@@ -777,17 +803,28 @@ func (s *Service) upsertServiceIntoLBMaps(svc *svcInfo, onlyLocalBackends bool,
 			logfields.BackendID: b.ID,
 			logfields.L3n4Addr:  b.L3n4Addr,
 		}).Debug("Adding new backend")
-
 		if err := s.lbmap.AddBackend(b.ID, b.L3n4Addr.IP,
-			b.L3n4Addr.L4Addr.Port, ipv6); err != nil {
+			b.L3n4Addr.L4Addr.Port, b.L3n4Addr.IsIPv6()); err != nil {
 			return err
 		}
 	}
 
 	// Upsert service entries into BPF maps
+	natPolicy := lb.SVCNatPolicyNone
+	natPolicySet := false
 	backends := make(map[string]lb.BackendID, len(svc.backends))
 	activeBackendsCount := 0
 	for _, b := range svc.backends {
+		// All backends have been previously checked to be either v4 or v6.
+		if !natPolicySet {
+			natPolicySet = true
+			v6BE := b.L3n4Addr.IsIPv6()
+			if v6FE && !v6BE {
+				natPolicy = lb.SVCNatPolicyNat64
+			} else if !v6FE && v6BE {
+				natPolicy = lb.SVCNatPolicyNat46
+			}
+		}
 		// Skip adding the terminating backend to the service map so that it
 		// won't be selected to serve new requests. However, the backend is still
 		// kept in the affinity and backend maps so that existing connections
@@ -800,7 +837,18 @@ func (s *Service) upsertServiceIntoLBMaps(svc *svcInfo, onlyLocalBackends bool,
 			activeBackendsCount++
 		}
 	}
+	if natPolicy == lb.SVCNatPolicyNat64 {
+		// Backends have been added to the v4 backend map, but we now also need
+		// to add them to the v6 backend map as v4-in-v6 address.
+		for _, b := range newBackends {
+			if err := s.lbmap.AddBackend(b.ID, b.L3n4Addr.IP,
+				b.L3n4Addr.L4Addr.Port, true); err != nil {
+				return err
+			}
+		}
+	}
 	svc.activeBackendsCount = activeBackendsCount
+	svc.svcNatPolicy = natPolicy
 
 	p := &lbmap.UpsertServiceParams{
 		ID:                        uint16(svc.frontend.ID),
@@ -808,7 +856,8 @@ func (s *Service) upsertServiceIntoLBMaps(svc *svcInfo, onlyLocalBackends bool,
 		Port:                      svc.frontend.L3n4Addr.L4Addr.Port,
 		Backends:                  backends,
 		PrevActiveBackendCount:    prevActiveBackendCount,
-		IPv6:                      ipv6,
+		IPv6:                      v6FE,
+		NatPolicy:                 natPolicy,
 		Type:                      svc.svcType,
 		Local:                     onlyLocalBackends,
 		Scope:                     svc.frontend.L3n4Addr.Scope,
@@ -829,11 +878,7 @@ func (s *Service) upsertServiceIntoLBMaps(svc *svcInfo, onlyLocalBackends bool,
 	for _, id := range obsoleteBackendIDs {
 		scopedLog.WithField(logfields.BackendID, id).
 			Debug("Removing obsolete backend")
-
-		if err := s.lbmap.DeleteBackendByID(id, ipv6); err != nil {
-			log.WithError(err).WithField(logfields.BackendID, id).
-				Warn("Failed to remove backend from maps")
-		}
+		s.lbmap.DeleteBackendByID(id)
 	}
 
 	return nil
@@ -867,11 +912,10 @@ func (s *Service) deleteOrphanBackends() error {
 		if s.backendRefCount[hash] == 0 {
 			log.WithField(logfields.BackendID, b.ID).
 				Debug("Removing orphan backend")
-
+			// The b.ID is unique across IPv4/6, hence attempt
+			// to clean it from both maps, and ignore errors.
 			DeleteBackendID(b.ID)
-			if err := s.lbmap.DeleteBackendByID(b.ID, b.L3n4Addr.IsIPv6()); err != nil {
-				return fmt.Errorf("Unable to remove backend %d from map: %s", b.ID, err)
-			}
+			s.lbmap.DeleteBackendByID(b.ID)
 			delete(s.backendByHash, hash)
 		}
 	}
@@ -907,6 +951,7 @@ func (s *Service) restoreServicesLocked() error {
 			backendByHash:       map[string]*lb.Backend{},
 			svcType:             svc.Type,
 			svcTrafficPolicy:    svc.TrafficPolicy,
+			svcNatPolicy:        svc.NatPolicy,
 
 			sessionAffinity:           svc.SessionAffinity,
 			sessionAffinityTimeoutSec: svc.SessionAffinityTimeoutSec,
@@ -953,9 +998,8 @@ func (s *Service) restoreServicesLocked() error {
 }
 
 func (s *Service) deleteServiceLocked(svc *svcInfo) error {
-	ipv6 := svc.frontend.L3n4Addr.IsIPv6()
+	ipv6 := svc.frontend.L3n4Addr.IsIPv6() || svc.svcNatPolicy == lb.SVCNatPolicyNat46
 	obsoleteBackendIDs := s.deleteBackendsFromCacheLocked(svc)
-
 	scopedLog := log.WithFields(logrus.Fields{
 		logfields.ServiceID: svc.frontend.ID,
 		logfields.ServiceIP: svc.frontend.L3n4Addr,
@@ -963,7 +1007,8 @@ func (s *Service) deleteServiceLocked(svc *svcInfo) error {
 	})
 	scopedLog.Debug("Deleting service")
 
-	if err := s.lbmap.DeleteService(svc.frontend, len(svc.backends), svc.useMaglev()); err != nil {
+	if err := s.lbmap.DeleteService(svc.frontend, len(svc.backends),
+		svc.useMaglev(), svc.svcNatPolicy); err != nil {
 		return err
 	}
 
@@ -990,10 +1035,7 @@ func (s *Service) deleteServiceLocked(svc *svcInfo) error {
 	for _, id := range obsoleteBackendIDs {
 		scopedLog.WithField(logfields.BackendID, id).
 			Debug("Deleting obsolete backend")
-
-		if err := s.lbmap.DeleteBackendByID(id, ipv6); err != nil {
-			return err
-		}
+		s.lbmap.DeleteBackendByID(id)
 	}
 	if err := DeleteID(uint32(svc.frontend.ID)); err != nil {
 		return fmt.Errorf("Unable to release service ID %d: %s", svc.frontend.ID, err)
