@@ -3805,6 +3805,15 @@ func init() {
               "description": "Service namespace  (e.g. Kubernetes namespace)",
               "type": "string"
             },
+            "natPolicy": {
+              "description": "Service protocol NAT policy",
+              "type": "string",
+              "enum": [
+                "None",
+                "Nat46",
+                "Nat64"
+              ]
+            },
             "trafficPolicy": {
               "description": "Service traffic policy",
               "type": "string",
@@ -8514,6 +8523,15 @@ func init() {
               "description": "Service namespace  (e.g. Kubernetes namespace)",
               "type": "string"
             },
+            "natPolicy": {
+              "description": "Service protocol NAT policy",
+              "type": "string",
+              "enum": [
+                "None",
+                "Nat46",
+                "Nat64"
+              ]
+            },
             "trafficPolicy": {
               "description": "Service traffic policy",
               "type": "string",
@@ -8562,6 +8580,15 @@ func init() {
         "namespace": {
           "description": "Service namespace  (e.g. Kubernetes namespace)",
           "type": "string"
+        },
+        "natPolicy": {
+          "description": "Service protocol NAT policy",
+          "type": "string",
+          "enum": [
+            "None",
+            "Nat46",
+            "Nat64"
+          ]
         },
         "trafficPolicy": {
           "description": "Service traffic policy",
