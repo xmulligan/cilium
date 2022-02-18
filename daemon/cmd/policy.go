@@ -388,41 +388,32 @@ func (d *Daemon) policyAdd(sourceRules policyAPI.Rules, opts *policy.AddOptions,
 
 	// Inject prefixes into the ipcache
 
-	if option.Config.SelectiveRegeneration {
-		// Only regenerate endpoints which are needed to be regenerated as a
-		// result of the rule update. The rules which were imported most likely
-		// do not select all endpoints in the policy repository (and may not
-		// select any at all). The "reacting" to rule updates enqueues events
-		// for all endpoints. Once all endpoints have events queued up, this
-		// function will return.
-		//
-		// With selective regeneration upserting CIDRs to ipcache is performed after
-		// endpoint regeneration and serialized with the corresponding ipcache deletes via
-		// the policy reaction queue.
-		r := &PolicyReactionEvent{
-			wg:                &policySelectionWG,
-			epsToBumpRevision: endpointsToBumpRevision,
-			endpointsToRegen:  endpointsToRegen,
-			newRev:            newRev,
-			upsertPrefixes:    prefixes,
-			uid:               "TODO",
-		}
+	// Only regenerate endpoints which are needed to be regenerated as a
+	// result of the rule update. The rules which were imported most likely
+	// do not select all endpoints in the policy repository (and may not
+	// select any at all). The "reacting" to rule updates enqueues events
+	// for all endpoints. Once all endpoints have events queued up, this
+	// function will return.
+	//
+	// With selective regeneration upserting CIDRs to ipcache is performed after
+	// endpoint regeneration and serialized with the corresponding ipcache deletes via
+	// the policy reaction queue.
+	r := &PolicyReactionEvent{
+		wg:                &policySelectionWG,
+		epsToBumpRevision: endpointsToBumpRevision,
+		endpointsToRegen:  endpointsToRegen,
+		newRev:            newRev,
+		upsertPrefixes:    prefixes,
+		uid:               "TODO",
+	}
 
-		ev := eventqueue.NewEvent(r)
-		// This event may block if the RuleReactionQueue is full. We don't care
-		// about when it finishes, just that the work it does is done in a serial
-		// order.
-		_, err := d.policy.RuleReactionQueue.Enqueue(ev)
-		if err != nil {
-			log.WithError(err).WithField(logfields.PolicyRevision, newRev).Error("enqueue of RuleReactionEvent failed")
-		}
-	} else {
-		// Regenerate all endpoints unconditionally.
-		d.TriggerPolicyUpdates(false, "policy rules added")
-		// TODO: Remove 'enable-selective-regeneration' agent option.  Without selective
-		// regeneration we retain the old behavior of upserting new identities to ipcache
-		// before endpoint policy maps have been updated.
-		ipcache.UpsertGeneratedIdentities(newlyAllocatedIdentities)
+	ev := eventqueue.NewEvent(r)
+	// This event may block if the RuleReactionQueue is full. We don't care
+	// about when it finishes, just that the work it does is done in a serial
+	// order.
+	_, err := d.policy.RuleReactionQueue.Enqueue(ev)
+	if err != nil {
+		log.WithError(err).WithField(logfields.PolicyRevision, newRev).Error("enqueue of RuleReactionEvent failed")
 	}
 
 	return
@@ -634,30 +625,25 @@ func (d *Daemon) policyDelete(labels labels.LabelArray, res chan interface{}) {
 		}
 	}
 
-	if option.Config.SelectiveRegeneration {
-		// With selective regeneration releasing prefixes from ipcache is serialized with
-		// the corresponding ipcache upserts via the policy reaction queue. Execution order
-		// w.r.t. to endpoint regenerations remains the same, endpoints are regenerated
-		// after any prefixes have been removed from the ipcache.
-		r := &PolicyReactionEvent{
-			wg:                &policySelectionWG,
-			epsToBumpRevision: epsToBumpRevision,
-			endpointsToRegen:  endpointsToRegen,
-			newRev:            rev,
-			releasePrefixes:   prefixes,
-		}
+	// With selective regeneration releasing prefixes from ipcache is serialized with
+	// the corresponding ipcache upserts via the policy reaction queue. Execution order
+	// w.r.t. to endpoint regenerations remains the same, endpoints are regenerated
+	// after any prefixes have been removed from the ipcache.
+	r := &PolicyReactionEvent{
+		wg:                &policySelectionWG,
+		epsToBumpRevision: epsToBumpRevision,
+		endpointsToRegen:  endpointsToRegen,
+		newRev:            rev,
+		releasePrefixes:   prefixes,
+	}
 
-		ev := eventqueue.NewEvent(r)
-		// This event may block if the RuleReactionQueue is full. We don't care
-		// about when it finishes, just that the work it does is done in a serial
-		// order.
-		_, err := d.policy.RuleReactionQueue.Enqueue(ev)
-		if err != nil {
-			log.WithError(err).WithField(logfields.PolicyRevision, rev).Error("enqueue of RuleReactionEvent failed")
-		}
-	} else {
-		ipcache.ReleaseCIDRIdentitiesByCIDR(prefixes)
-		d.TriggerPolicyUpdates(true, "policy rules deleted")
+	ev := eventqueue.NewEvent(r)
+	// This event may block if the RuleReactionQueue is full. We don't care
+	// about when it finishes, just that the work it does is done in a serial
+	// order.
+	_, err := d.policy.RuleReactionQueue.Enqueue(ev)
+	if err != nil {
+		log.WithError(err).WithField(logfields.PolicyRevision, rev).Error("enqueue of RuleReactionEvent failed")
 	}
 
 	err := d.SendNotification(monitorAPI.PolicyDeleteMessage(deleted, labels.GetModel(), rev))
