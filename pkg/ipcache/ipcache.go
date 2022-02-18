@@ -391,6 +391,39 @@ func (ipc *IPCache) upsertLocked(
 	return namedPortsChanged, nil
 }
 
+func (ipc *IPCache) UpsertIdentity(cidr string, id identity.Identity) error {
+	return errors.New("not implemented")
+}
+func (ipc *IPCache) UpsertEncryptKey(cidr string, key uint8) error {
+	return errors.New("not implemented")
+}
+func (ipc *IPCache) UpsertK8sMetadata(cidr string, k8sMeta *K8sMetadata) error {
+	return errors.New("not implemented")
+}
+
+// TODO: Figure out what kind of mechanism we need to report that this operation was completed
+func (ipc *IPCache) UpsertLabels(cidr string, lbls labels.Labels, fs FeatureSource, uid k8sTypes.UID) error {
+	// TODO: Review the locking
+	ipc.Lock()
+	defer ipc.Unlock()
+
+	UpsertMetadata(cidr, lbls, fs, uid)
+
+	//ipc.TriggerLabelInjection()
+
+	return errors.New("not implemented")
+}
+
+//func (ipc *IPcache) UpsertCIDRs(cidrs []string) error {
+//	ipc.Lock()
+//	defer ipc.Unlock()
+//
+//	for c := cidrs {
+//		// insert into the tree
+//	}
+//	ipc.TriggerLabelInjection()
+//}
+
 // DumpToListenerLocked dumps the entire contents of the IPCache by triggering
 // the listener's "OnIPIdentityCacheChange" method for each entry in the cache.
 func (ipc *IPCache) DumpToListenerLocked(listener IPIdentityMappingListener) {
