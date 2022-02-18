@@ -586,6 +586,7 @@ __section_tail(CILIUM_MAP_CALLS, CILIUM_CALL_IPV6_NODEPORT_NAT)
 int tail_nodeport_nat_ipv6(struct __ctx_buff *ctx)
 {
 	enum nat_dir dir = (enum nat_dir)ctx_load_meta(ctx, CB_NAT);
+	const bool nat_46x64 = ctx_load_meta(ctx, CB_NAT_46X64);
 	union v6addr tmp = IPV6_DIRECT_ROUTING;
 	struct bpf_fib_lookup_padded fib_params = {
 		.l = {
@@ -598,11 +599,14 @@ int tail_nodeport_nat_ipv6(struct __ctx_buff *ctx)
 		.max_port = NODEPORT_PORT_MAX_NAT,
 		.src_from_world = true,
 	};
+	bool l2_hdr_required = true;
+	__u8 l3_off = __ETH_HLEN;
 	void *data, *data_end;
 	struct ipv6hdr *ip6;
-	bool l2_hdr_required = true;
 	int ret;
 
+	if (nat_46x64)
+		build_v4_in_v6(&tmp, IPV4_DIRECT_ROUTING);
 	target.addr = tmp;
 #ifdef TUNNEL_MODE
 	if (dir == NAT_DIR_EGRESS) {
@@ -677,13 +681,17 @@ int tail_nodeport_nat_ipv6(struct __ctx_buff *ctx)
 	if (!l2_hdr_required)
 		goto out_send;
 	else if (!revalidate_data_with_eth_hlen(ctx, &data, &data_end, &ip6,
-						__ETH_HLEN))
+						l3_off))
 		return DROP_INVALID;
-
 	ipv6_addr_copy((union v6addr *)&fib_params.l.ipv6_src,
 		       (union v6addr *)&ip6->saddr);
 	ipv6_addr_copy((union v6addr *)&fib_params.l.ipv6_dst,
 		       (union v6addr *)&ip6->daddr);
+	if (nat_46x64) {
+		ret = lb6_to_lb4(ctx, ip6, l3_off);
+		if (ret < 0)
+			goto drop_err;
+	}
 
 	ret = fib_lookup(ctx, &fib_params.l, sizeof(fib_params),
 			 BPF_FIB_LOOKUP_DIRECT | BPF_FIB_LOOKUP_OUTPUT);
@@ -774,6 +782,7 @@ skip_service_lookup:
 			return CTX_ACT_OK;
 
 		ctx_store_meta(ctx, CB_NAT, NAT_DIR_INGRESS);
+		ctx_store_meta(ctx, CB_NAT_46X64, 0);
 		ctx_store_meta(ctx, CB_SRC_IDENTITY, src_identity);
 		ep_tail_call(ctx, CILIUM_CALL_IPV6_NODEPORT_NAT);
 		return DROP_MISSED_TAIL_CALL;
@@ -844,6 +853,9 @@ redo:
 			ep_tail_call(ctx, CILIUM_CALL_IPV6_NODEPORT_DSR);
 		} else {
 			ctx_store_meta(ctx, CB_NAT, NAT_DIR_EGRESS);
+			ctx_store_meta(ctx, CB_NAT_46X64,
+				       !is_v4_in_v6(&key.address) &&
+				       lb6_to_lb4_service(svc));
 			ep_tail_call(ctx, CILIUM_CALL_IPV6_NODEPORT_NAT);
 		}
 		return DROP_MISSED_TAIL_CALL;
@@ -1775,10 +1787,17 @@ skip_service_lookup:
 		if (nodeport_uses_dsr4(&tuple))
 			return CTX_ACT_OK;
 #endif
-
 		ctx_store_meta(ctx, CB_NAT, NAT_DIR_INGRESS);
 		ctx_store_meta(ctx, CB_SRC_IDENTITY, src_identity);
-		ep_tail_call(ctx, CILIUM_CALL_IPV4_NODEPORT_NAT);
+		lb4_populate_ports(ctx, &tuple, l4_off);
+		if (snat_v6_has_v4_match(&tuple)) {
+			ret = lb4_to_lb6(ctx, ip4, l3_off);
+			if (ret)
+				return ret;
+			ep_tail_call(ctx, CILIUM_CALL_IPV6_NODEPORT_NAT);
+		} else {
+			ep_tail_call(ctx, CILIUM_CALL_IPV4_NODEPORT_NAT);
+		}
 		return DROP_MISSED_TAIL_CALL;
 	}
 
