@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/sirupsen/logrus"
+	k8sTypes "k8s.io/apimachinery/pkg/types"
 
 	"github.com/cilium/cilium/pkg/controller"
 	"github.com/cilium/cilium/pkg/identity"
@@ -39,7 +40,7 @@ var (
 	// thereby associating these labels with each prefix that is 'covered'
 	// by this prefix. Subsequently these labels may be matched by network
 	// policy and propagated in monitor output.
-	identityMetadata = make(map[string]labels.Labels)
+	identityMetadata = make(map[string]CIDRInfo)
 
 	// applyIDMDChangesMutex protects InjectLabels and RemoveLabelsExcluded from being run in parallel
 	applyIDMDChangesMutex lock.Mutex
@@ -49,18 +50,48 @@ var (
 	ErrLocalIdentityAllocatorUninitialized = errors.New("local identity allocator uninitialized")
 )
 
+// TODO: Better name
+type FeatureSource int
+
+// TODO: Review these names too
+const (
+	FSKubeAPIServer = FeatureSource(iota)
+	FSPolicy
+	FSDaemon
+)
+
+type labelsWithSource struct {
+	labels.Labels
+	FeatureSource
+}
+
+// TODO: Better name
+type CIDRInfo map[k8sTypes.UID]labelsWithSource
+
+// TODO: Make sure no locking is OK
+func (s CIDRInfo) ToLabels() labels.Labels {
+	l := labels.NewLabelsFromModel(nil)
+	for _, v := range s {
+		l.MergeLabels(v.Labels)
+	}
+	return l
+}
+
 // UpsertMetadata upserts a given IP and its corresponding labels associated
 // with it into the identityMetadata map. The given labels are not modified nor
 // is its reference saved, as they're copied when inserting into the map.
-func UpsertMetadata(prefix string, lbls labels.Labels) {
+func UpsertMetadata(prefix string, lbls labels.Labels, fs FeatureSource, uid k8sTypes.UID) {
 	l := labels.NewLabelsFromModel(nil)
 	l.MergeLabels(lbls)
 
 	idMDMU.Lock()
-	if cur, ok := identityMetadata[prefix]; ok {
-		l.MergeLabels(cur)
+	if _, ok := identityMetadata[prefix]; !ok {
+		identityMetadata[prefix] = make(CIDRInfo)
 	}
-	identityMetadata[prefix] = l
+	identityMetadata[prefix][uid] = labelsWithSource{
+		FeatureSource: fs,
+		Labels:        l,
+	}
 	idMDMU.Unlock()
 }
 
@@ -70,7 +101,7 @@ func UpsertMetadata(prefix string, lbls labels.Labels) {
 func GetIDMetadataByIP(prefix string) labels.Labels {
 	idMDMU.RLock()
 	defer idMDMU.RUnlock()
-	return identityMetadata[prefix]
+	return identityMetadata[prefix].ToLabels()
 }
 
 // InjectLabels injects labels from the identityMetadata (IDMD) map into the
@@ -110,7 +141,8 @@ func InjectLabels(src source.Source, updater identityUpdater, triggerer policyTr
 
 	idMDMU.Lock()
 
-	for prefix, lbls := range identityMetadata {
+	for prefix, info := range identityMetadata {
+		lbls := info.ToLabels()
 		id, isNew, err := injectLabels(prefix, lbls)
 		if err != nil {
 			idMDMU.Unlock()
@@ -286,6 +318,7 @@ func RemoveLabelsExcluded(
 	src source.Source,
 	updater identityUpdater,
 	triggerer policyTriggerer,
+	uid k8sTypes.UID,
 ) {
 	applyIDMDChangesMutex.Lock()
 	defer applyIDMDChangesMutex.Unlock()
@@ -301,7 +334,7 @@ func RemoveLabelsExcluded(
 		}
 	}
 
-	removeLabelsFromIPs(toRemove, src, updater, triggerer)
+	removeLabelsFromIPs(toRemove, src, updater, triggerer, uid)
 }
 
 // filterMetadataByLabels returns all the prefixes inside the identityMetadata
@@ -312,7 +345,8 @@ func RemoveLabelsExcluded(
 func filterMetadataByLabels(filter labels.Labels) []string {
 	var matching []string
 	sortedFilter := filter.SortedList()
-	for prefix, lbls := range identityMetadata {
+	for prefix, info := range identityMetadata {
+		lbls := info.ToLabels()
 		if bytes.Contains(lbls.SortedList(), sortedFilter) {
 			matching = append(matching, prefix)
 		}
@@ -333,6 +367,7 @@ func removeLabelsFromIPs(
 	src source.Source,
 	updater identityUpdater,
 	triggerer policyTriggerer,
+	uid k8sTypes.UID,
 ) {
 	var (
 		idsToAdd    = make(map[identity.NumericIdentity]labels.LabelArray)
@@ -353,7 +388,7 @@ func removeLabelsFromIPs(
 		idsToDelete[id.ID] = nil // labels for deletion don't matter to UpdateIdentities()
 
 		// Insert to propagate the updated set of labels after removal.
-		l := removeLabels(prefix, lbls, src)
+		l := removeLabels(prefix, lbls, src, uid)
 		if len(l) > 0 {
 			// If for example kube-apiserver label is removed from the local
 			// host identity (when the kube-apiserver is running within the
@@ -436,13 +471,15 @@ func removeLabelsFromIPs(
 // removed if the prefix is no longer associated with any labels.
 //
 // This function assumes that the IDMD and the IPIdentityCache locks are taken!
-func removeLabels(prefix string, lbls labels.Labels, src source.Source) labels.Labels {
-	l, ok := identityMetadata[prefix]
+func removeLabels(prefix string, lbls labels.Labels, src source.Source, uid k8sTypes.UID) labels.Labels {
+	info, ok := identityMetadata[prefix]
 	if !ok {
+		// TODO: Warn?
 		return nil
 	}
+	delete(info, uid)
 
-	l = l.Remove(lbls)
+	l := info.ToLabels()
 	if len(l) == 0 { // Labels empty, delete
 		// No labels left. Example case: when the kube-apiserver is running
 		// outside of the cluster, meaning that the IDMD only ever had the
@@ -450,14 +487,11 @@ func removeLabels(prefix string, lbls labels.Labels, src source.Source) labels.L
 		// removed.
 		delete(identityMetadata, prefix)
 	} else {
-		// This case is only hit if the prefix for the kube-apiserver is
-		// running within the cluster. Therefore, the IDMD can only ever has
-		// the following labels:
-		//   * kube-apiserver + remote-node
-		//   * kube-apiserver + host
-		identityMetadata[prefix] = l
+		// TODO: Ensure that CiliumNode updates will populate the 'info'
+		// with the information "CIDR X is a remote node".
 	}
 
+	// TODO: Delete...?
 	id, exists := IPIdentityCache.LookupByIPRLocked(prefix)
 	if !exists {
 		log.WithFields(logrus.Fields{
@@ -471,6 +505,7 @@ func removeLabels(prefix string, lbls labels.Labels, src source.Source) labels.L
 		)
 		return nil
 	}
+
 	realID := IdentityAllocator.LookupIdentityByID(context.TODO(), id.ID)
 	if realID == nil {
 		log.WithFields(logrus.Fields{
@@ -501,14 +536,20 @@ func removeLabels(prefix string, lbls labels.Labels, src source.Source) labels.L
 		return nil
 	}
 
+	// TODO: Is it possible for a CIDR identity to hit this line? Maybe if
+	// there is CIDR policy for a kube-apiserver /32 IP, and you add/delete
+	// that policy a few times, you leak references to the identity
+	// corresponding to "reserved:kube-apiserver","cidr:w.x.y.z/32", ..
+
 	// Generate new identity with the label removed. This should be the case
 	// where the existing identity had >1 refcount, meaning that something was
 	// referring to it.
-	allLbls := labels.NewLabelsFromModel(nil)
-	allLbls.MergeLabels(realID.Labels)
-	allLbls = allLbls.Remove(lbls)
-
-	return allLbls
+	//
+	// If kube-apiserver is inside the cluster, this path is always hit
+	// (because even if we remove the kube-apiserver from that node, we
+	// need to inject the identity corresponding to "host" or "remote-node"
+	// (without apiserver label)
+	return l
 }
 
 func sourceByLabels(d source.Source, lbls labels.Labels) source.Source {

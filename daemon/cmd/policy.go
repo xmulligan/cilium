@@ -287,25 +287,6 @@ func (d *Daemon) policyAdd(sourceRules policyAPI.Rules, opts *policy.AddOptions,
 		}
 	}
 
-	// Any newly allocated identities MUST be upserted to the ipcache if no error is returned.
-	// With SelectiveRegeneration this is postponed to the rule reaction queue to be done
-	// after the affected endpoints have been regenerated, otherwise new identities are
-	// upserted to the ipcache before we return.
-	//
-	// Release of these identities will be tied to the corresponding policy
-	// in the policy.Repository and released upon policyDelete().
-	newlyAllocatedIdentities := make(map[string]*identity.Identity)
-	if _, err := ipcache.AllocateCIDRs(prefixes, newlyAllocatedIdentities); err != nil {
-		_ = d.prefixLengths.Delete(prefixes)
-		logger.WithError(err).WithField("prefixes", prefixes).Warn(
-			"Failed to allocate identities for CIDRs during policy add")
-		resChan <- &PolicyAddResult{
-			newRev: 0,
-			err:    err,
-		}
-		return
-	}
-
 	// No errors past this point!
 
 	d.policy.Mutex.Lock()
@@ -405,6 +386,8 @@ func (d *Daemon) policyAdd(sourceRules policyAPI.Rules, opts *policy.AddOptions,
 		logger.WithError(err).WithField(logfields.PolicyRevision, newRev).Warn("Failed to send policy update as monitor notification")
 	}
 
+	// Inject prefixes into the ipcache
+
 	if option.Config.SelectiveRegeneration {
 		// Only regenerate endpoints which are needed to be regenerated as a
 		// result of the rule update. The rules which were imported most likely
@@ -421,7 +404,8 @@ func (d *Daemon) policyAdd(sourceRules policyAPI.Rules, opts *policy.AddOptions,
 			epsToBumpRevision: endpointsToBumpRevision,
 			endpointsToRegen:  endpointsToRegen,
 			newRev:            newRev,
-			upsertIdentities:  newlyAllocatedIdentities,
+			upsertPrefixes:    prefixes,
+			uid:               "TODO",
 		}
 
 		ev := eventqueue.NewEvent(r)
@@ -452,8 +436,10 @@ type PolicyReactionEvent struct {
 	epsToBumpRevision *policy.EndpointSet
 	endpointsToRegen  *policy.EndpointSet
 	newRev            uint64
-	upsertIdentities  map[string]*identity.Identity // deferred CIDR identity upserts, if any
-	releasePrefixes   []*net.IPNet                  // deferred CIDR identity deletes, if any
+	//upsertIdentities  map[string]*identity.Identity // deferred CIDR identity upserts, if any
+	upsertPrefixes  []*net.IPNet
+	releasePrefixes []*net.IPNet // deferred CIDR identity deletes, if any
+	uid             k8sTypes.UID
 }
 
 // Handle implements pkg/eventqueue/EventHandler interface.
@@ -461,7 +447,7 @@ func (r *PolicyReactionEvent) Handle(res chan interface{}) {
 	// Wait until we have calculated which endpoints need to be selected
 	// across multiple goroutines.
 	r.wg.Wait()
-	reactToRuleUpdates(r.epsToBumpRevision, r.endpointsToRegen, r.newRev, r.upsertIdentities, r.releasePrefixes)
+	reactToRuleUpdates(r.epsToBumpRevision, r.endpointsToRegen, r.newRev, r.cidrs, r.releasePrefixes, r.uid)
 }
 
 // reactToRuleUpdates does the following:
@@ -470,13 +456,14 @@ func (r *PolicyReactionEvent) Handle(res chan interface{}) {
 //   in allEps, to revision rev.
 // * wait for the regenerations to be finished
 // * upsert or delete CIDR identities to the ipcache, as needed.
-func reactToRuleUpdates(epsToBumpRevision, epsToRegen *policy.EndpointSet, rev uint64, upsertIdentities map[string]*identity.Identity, releasePrefixes []*net.IPNet) {
+func reactToRuleUpdates(epsToBumpRevision, epsToRegen *policy.EndpointSet, rev uint64, upsertPrefixes []*net.IPNet, releasePrefixes []*net.IPNet) {
 	var enqueueWaitGroup sync.WaitGroup
 
 	// Release CIDR identities before regenerations have been started, if any. This makes sure
 	// the stale identities are not used in policy map classifications after we regenerate the
 	// endpoints below.
 	if len(releasePrefixes) != 0 {
+		// TODO: How does this fit with the new Labels-based ipcache API?
 		ipcache.ReleaseCIDRIdentitiesByCIDR(releasePrefixes)
 	}
 
@@ -511,12 +498,22 @@ func reactToRuleUpdates(epsToBumpRevision, epsToRegen *policy.EndpointSet, rev u
 
 	enqueueWaitGroup.Wait()
 
+	// Allocate identities for new CIDRs (if necessary),
+	// Update the endpoint policymaps,
+	// Update the ipcache to point this CIDR to the new identities.
+	for c := range upsertPrefixes {
+		// Eventually (async) create any identities necessary to implement this CIDR policy,
+		// Make sure that the selectorccache is updated with these identities + policymaps updated in BPF
+		// THEN update ipcache with the IP->Identtiy mappings
+		ipcache.UpsertLabels(c, cidr.GetCIDRLabels(c), ipcache.FSPolicy, uid)
+	}
+
 	// Upsert new identities after regeneration has completed, if any. This makes sure the
 	// policy maps are ready to classify packets using the newly allocated identities before
 	// they are upserted to the ipcache here.
-	if upsertIdentities != nil {
-		ipcache.UpsertGeneratedIdentities(upsertIdentities)
-	}
+	//if upsertIdentities != nil {
+	//	ipcache.UpsertGeneratedIdentities(upsertIdentities)
+	//}
 }
 
 // PolicyDeleteEvent is a wrapper around deletion of policy rules with a given
