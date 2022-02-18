@@ -189,6 +189,7 @@ func InjectLabels(src source.Source, updater identityUpdater, triggerer policyTr
 
 		// This will take the accumulated policy map changes from the above,
 		// and realizes it into the datapath.
+		// TODO: Maybe there's a cheaper version of this call?
 		triggerer.TriggerPolicyUpdates(false, "kube-apiserver identity updated")
 	}
 
