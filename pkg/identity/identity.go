@@ -176,6 +176,13 @@ func (pair *IPIdentityPair) PrefixString() string {
 func RequiresGlobalIdentity(lbls labels.Labels) bool {
 	needsGlobal := true
 
+	// return true for something like this:
+	// reserved:world
+	// cidr:w.x.y.z
+
+	// Return false for something like this:
+	// k8s:app=foo
+
 	for _, label := range lbls {
 		switch label.Source {
 		case labels.LabelSourceCIDR, labels.LabelSourceReserved:

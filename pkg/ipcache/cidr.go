@@ -58,6 +58,7 @@ func AllocateCIDRs(
 			continue
 		}
 
+		// CIDR: cidr:10.0.0.0/8, ... cidr:0.0.0.0/0, reserved:world
 		lbls := cidr.GetCIDRLabels(p)
 		lbls.MergeLabels(GetIDMetadataByIP(p.IP.String()))
 

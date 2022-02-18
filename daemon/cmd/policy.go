@@ -24,11 +24,11 @@ import (
 	"github.com/cilium/cilium/pkg/endpointmanager"
 	"github.com/cilium/cilium/pkg/envoy"
 	"github.com/cilium/cilium/pkg/eventqueue"
-	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/identity/cache"
 	"github.com/cilium/cilium/pkg/ipcache"
 	"github.com/cilium/cilium/pkg/k8s"
 	"github.com/cilium/cilium/pkg/labels"
+	"github.com/cilium/cilium/pkg/labels/cidr"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	bpfIPCache "github.com/cilium/cilium/pkg/maps/ipcache"
 	"github.com/cilium/cilium/pkg/metrics"
@@ -254,6 +254,10 @@ func (d *Daemon) policyAdd(sourceRules policyAPI.Rules, opts *policy.AddOptions,
 		logger.WithField(logfields.CiliumNetworkPolicy, sourceRules.String()).Info("Policy Add Request")
 	}
 
+	// Rule allow "1.2.3.0/24"
+
+	// prefixes = net.IPNet(1.2.3.0, "/24")
+
 	prefixes := policy.GetCIDRPrefixes(sourceRules)
 	logger.WithField("prefixes", prefixes).Debug("Policy imported via API, found CIDR prefixes...")
 
@@ -355,6 +359,7 @@ func (d *Daemon) policyAdd(sourceRules policyAPI.Rules, opts *policy.AddOptions,
 		err:    nil,
 	}
 
+	// Which endpoints are selected by the policy (need regeneration)
 	addedRules.UpdateRulesEndpointsCaches(endpointsToBumpRevision, endpointsToRegen, &policySelectionWG)
 
 	d.policy.Mutex.Unlock()
@@ -484,6 +489,9 @@ func reactToRuleUpdates(epsToBumpRevision, epsToRegen *policy.EndpointSet, rev u
 	})
 
 	// Regenerate all other endpoints.
+	//
+	// Goal: Prepare the SelectorCache, CachedSelectorPolicy, EndpointPolicy
+	// objects to account for the new rule updates.
 	regenMetadata := &regeneration.ExternalRegenerationMetadata{
 		Reason:            "policy rules added",
 		RegenerationLevel: regeneration.RegenerateWithoutDatapath,
