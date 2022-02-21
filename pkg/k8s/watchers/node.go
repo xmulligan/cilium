@@ -190,6 +190,8 @@ func (u *CiliumNodeUpdater) updateCiliumNode(nodeDiscovery *nodediscovery.NodeDi
 						return fmt.Errorf("node registrar is not yet initialized")
 					}
 
+					return
+
 					if err := nodeDiscovery.Registrar.UpdateLocalKeySync(n); err != nil {
 						return fmt.Errorf("failed to update KV store entry: %s", err)
 					}
